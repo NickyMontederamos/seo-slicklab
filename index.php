@@ -198,6 +198,7 @@ document.getElementById('audit-form')?.addEventListener('submit',function(){
   $ttfb     = (int)($timing['ttfb_ms'] ?? 0);
   $domMs    = isset($timing['dom_load_ms']) ? (int)$timing['dom_load_ms'] : null;
   $headless = !empty($timing['headless_available']);
+  $risk     = $audit['risk'] ?? null;
 ?>
 
 <div class="status-bar">
@@ -242,6 +243,30 @@ document.getElementById('audit-form')?.addEventListener('submit',function(){
 </div>
 <?php endif; ?>
 
+<?php if (is_array($risk)):
+  $rflags  = $risk['flags'] ?? [];
+  $rstatus = (string)($risk['status'] ?? 'clean');
+  $rpill   = ['high'=>'crit','review'=>'warn'][$rstatus] ?? 'pass';
+?>
+<h2>Risk flags <span class="pill <?= $rpill ?>"><?= esc(strtoupper($rstatus)) ?></span> <span class="muted" style="font-weight:400;font-size:12px">spam policy &amp; AI manipulation · not part of the score</span></h2>
+<div class="panel">
+<?php if (!$rflags): ?>
+  <p class="muted" style="margin:0">No hidden AI instructions, hidden links, cloaking, sneaky redirects or keyword stuffing found.</p>
+<?php endif; ?>
+<?php foreach ($rflags as $f): $rc=sev_class((string)($f['severity']??'notice')); ?>
+  <div class="rec <?= $rc ?>">
+    <h4><?= esc((string)($f['title']??'')) ?></h4>
+    <div class="meta"><?= esc((string)($f['severity']??'')) ?></div>
+    <div><?= esc((string)($f['detail']??'')) ?></div>
+    <?php foreach (array_slice($f['evidence'] ?? [], 0, 3) as $e): ?>
+    <div class="mono" style="margin-top:4px"><span class="muted"><?= esc((string)($e['where']??'')) ?>:</span> <?= esc((string)($e['text']??'')) ?></div>
+    <?php endforeach; ?>
+    <div class="fix">→ <?= esc((string)($f['action']??'')) ?></div>
+  </div>
+<?php endforeach; ?>
+</div>
+<?php endif; ?>
+
 <?php if ($recs): ?>
 <h2>Recommendations <span class="muted" style="font-weight:400;font-size:12px">(<?= count($recs) ?> total)</span></h2>
 <div class="panel">
@@ -278,7 +303,7 @@ document.getElementById('audit-form')?.addEventListener('submit',function(){
 
 <?php endif; ?>
 
-<div class="footer">SEO-slicklab v2.1.0 · 10-engine technical &amp; GEO audit · runs locally · no data leaves this server</div>
+<div class="footer">SEO-slicklab v2.1.0 · 10-engine technical &amp; GEO audit + risk flags · runs locally · no data leaves this server</div>
 </div>
 </body>
 </html>

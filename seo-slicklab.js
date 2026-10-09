@@ -63,6 +63,7 @@ const MODULE_META = {
 };
 
 const SEVERITY_WEIGHT = { critical: 6, warning: 3, notice: 1, info: 1 };
+const GPTBOT_UA = 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.0; +https://openai.com/gptbot';
 
 /* ============================================================================
  * 1. OPTIONAL DEPENDENCIES
@@ -74,6 +75,8 @@ catch {
   console.error('\n  ✖ Missing dependency: cheerio\n    npm install cheerio\n');
   process.exit(2);
 }
+
+const riskEngine = require('./engines/risk.js');
 
 let playwright = null;
 let playwrightErr = null;
@@ -147,7 +150,7 @@ function parseArgs(argv) {
   const o = {
     url: null, format: 'text', out: null, timeout: 30000,
     profile: 'slicklab_default', headless: true, external: false,
-    social: true, llms: true, probe: false, quiet: false, verbose: false,
+    social: true, llms: true, risk: true, probe: false, quiet: false, verbose: false,
     failUnder: null, help: false, version: false
   };
   const args = argv.slice(2);
@@ -178,6 +181,7 @@ function parseArgs(argv) {
       case '--check-external-links': o.external = true; break;
       case '--no-social': o.social = false; break;
       case '--no-llms': o.llms = false; break;
+      case '--no-risk': o.risk = false; break;
       case '--probe-ai-bots': o.probe = true; break;
       case '-q': case '--quiet': o.quiet = true; break;
       case '--verbose': o.verbose = true; break;
@@ -207,6 +211,7 @@ ${bold('OPTIONS')}
       --check-external-links         HEAD-check outbound links (slower)
       --no-social                    Skip social image verification
       --no-llms                      Skip /llms.txt + robots.txt AI checks
+      --no-risk                      Skip spam-policy / AI-manipulation risk flags
       --probe-ai-bots                Send a live request as GPTBot
       --fail-under <score>           Exit 1 if overall score < N
   -q, --quiet                        Suppress progress on stderr
@@ -365,6 +370,9 @@ async function fetchHeadless(targetUrl, opts) {
     await sleep(NETWORK_IDLE_MS);
 
     const html = await page.content();
+    const hiddenElements = opts.risk
+      ? await page.evaluate(riskEngine.collectRenderedHidden).catch(() => null)
+      : null;
     const finalUrl = page.url();
     const status = response ? response.status() : 0;
     const headers = response ? response.headers() : {};
@@ -390,7 +398,7 @@ async function fetchHeadless(targetUrl, opts) {
 
     return {
       available: true, error: null, html, finalUrl, status, headers,
-      domLoadMs, consoleErrors: consoleErrors.slice(0, 25),
+      domLoadMs, hiddenElements, consoleErrors: consoleErrors.slice(0, 25),
       responses, navMetrics, resources, redirects
     };
   } catch (err) {
@@ -2595,8 +2603,37 @@ async function runAudit(targetUrl, options) {
   // ---- Live AI bot probe ----
   if (options.probe) {
     step('Probing as GPTBot…');
-    aiProbe = await fetchRaw(raw.finalUrl, options,
-      'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.0; +https://openai.com/gptbot');
+    aiProbe = await fetchRaw(raw.finalUrl, options, GPTBOT_UA);
+  }
+
+  // ---- Risk flags (spam policy & AI manipulation; not scored) ----
+  let risk = null;
+  if (options.risk) {
+    step('Fetching as Googlebot and GPTBot for cloaking check…');
+    const asBot = async (label, ua, flagBlocking) => {
+      try {
+        const r = await fetchRaw(raw.finalUrl, options, ua);
+        return { label, status: r.status, html: r.html, finalUrl: r.finalUrl, flagBlocking };
+      } catch (e) {
+        return { label, status: 0, html: '', finalUrl: null, error: e.message, flagBlocking };
+      }
+    };
+    // CDNs routinely refuse requests that claim to be Googlebot from non-Google IPs,
+    // so a refusal here says nothing about the real Googlebot. Only compare content.
+    const variants = [await asBot('Googlebot', UA_PROFILES.googlebot_desktop, false)];
+    variants.push(aiProbe
+      ? { label: 'GPTBot', status: aiProbe.status, html: aiProbe.html, finalUrl: aiProbe.finalUrl }
+      : await asBot('GPTBot', GPTBOT_UA, true));
+    risk = riskEngine.analyzeRisk({
+      url: raw.finalUrl,
+      status: raw.status,
+      rawHtml: raw.html,
+      renderedHtml: headless.available ? headless.html : null,
+      renderedUrl: headless.available && headless.html ? headless.finalUrl : null,
+      renderedHidden: headless.available ? (headless.hiddenElements || null) : null,
+      variants
+    });
+    step(`  risk: ${risk.status} (${risk.flags.length} flag${risk.flags.length === 1 ? '' : 's'})`);
   }
 
   // ---- Assemble context ----
@@ -2652,7 +2689,8 @@ async function runAudit(targetUrl, options) {
     },
     modules,
     recommendations: scoring.recommendations,
-    fix_snippets: scoring.fix_snippets
+    fix_snippets: scoring.fix_snippets,
+    risk
   };
 
   return result;
@@ -2702,6 +2740,24 @@ function formatText(result) {
     lines.push(`${label}${bar}  ${String(m.score).padStart(3)}/100`);
   }
   lines.push('');
+
+  // ---- Risk flags ----
+  if (result.risk) {
+    const rk = result.risk;
+    const head = rk.status === 'high' ? red(bold('HIGH')) : rk.status === 'review' ? yellow(bold('REVIEW')) : green(bold('CLEAN'));
+    lines.push(`  ${bold('RISK FLAGS')}  ${head}  ${gray('(spam policy & AI manipulation — not part of the score)')}`);
+    lines.push(gray('  ' + '─'.repeat(70)));
+    if (!rk.flags.length) lines.push(green('  No spam-policy or AI-manipulation red flags found.'));
+    for (const f of rk.flags) {
+      const sev = f.severity === 'critical' ? red('[CRIT]') : f.severity === 'warning' ? yellow('[WARN]') : cyan('[INFO]');
+      lines.push(`  ${sev} ${bold(f.title)}`);
+      lines.push(`         ${wrap(f.detail, 66, '         ')}`);
+      for (const e of f.evidence.slice(0, 3)) lines.push(`         ${gray(e.where + ':')} ${truncate(e.text, 90)}`);
+      lines.push(`         ${green('→')} ${wrap(f.action, 64, '           ')}`);
+      lines.push('');
+    }
+    lines.push('');
+  }
 
   // ---- Top recommendations ----
   if (result.recommendations.length) {
@@ -2796,6 +2852,25 @@ function formatMarkdown(result) {
     lines.push(`| ${MODULE_META[m.key].n} | ${m.label} | ${m.weight}% | ${m.score}/100 |`);
   }
   lines.push('');
+
+  if (result.risk) {
+    const rk = result.risk;
+    lines.push(`## Risk Flags — ${rk.status.toUpperCase()}`);
+    lines.push('');
+    lines.push('_Spam-policy and AI-manipulation red flags. Not part of the score._');
+    lines.push('');
+    if (!rk.flags.length) lines.push('No red flags found.');
+    for (const f of rk.flags) {
+      lines.push(`### ${f.severity === 'critical' ? '🔴' : f.severity === 'warning' ? '🟡' : '🔵'} ${f.title}`);
+      lines.push('');
+      lines.push(f.detail);
+      lines.push('');
+      for (const e of f.evidence.slice(0, 5)) lines.push(`- **${e.where}:** \`${truncate(e.text, 160).replace(/`/g, "'")}\``);
+      if (f.evidence.length) lines.push('');
+      lines.push(`**Fix:** ${f.action}`);
+      lines.push('');
+    }
+  }
 
   lines.push(`## Recommendations`);
   lines.push('');

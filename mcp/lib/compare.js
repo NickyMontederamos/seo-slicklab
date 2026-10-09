@@ -6,6 +6,9 @@
  * Pure functions — no network — so they can be tested against saved audits.
  */
 
+const { clean } = require('./untrusted.js');
+const { formatRisk } = require('./risk-format.js');
+
 const SEVERITY_RANK = { critical: 3, warning: 2, notice: 1, info: 0 };
 const SEVERITY_WEIGHT = { critical: 6, warning: 3, notice: 1, info: 1 };
 
@@ -82,7 +85,8 @@ function buildGapReport(you, rivals) {
     rivals: audited.map(siteSummary),
     not_audited: failed.map((r) => ({ label: r.label, url: r.url, error: r.error || 'unknown error' })),
     modules,
-    gaps, open_ground: openGround, edges
+    gaps, open_ground: openGround, edges,
+    risk: [you, ...audited].map((s, i) => ({ label: s.label, url: s.url, rival: i > 0, risk: s.audit.risk || null }))
   };
 }
 
@@ -96,7 +100,7 @@ function siteSummary(s) {
   };
 }
 
-function cell(s) { return String(s == null ? '—' : s).replace(/\|/g, '\\|').replace(/\s+/g, ' '); }
+function cell(s) { return s == null ? '—' : clean(s, 160); }
 
 /** Markdown for an MCP client or a report file. `limit` caps each list. */
 function formatGapReport(report, limit = 10) {
@@ -108,6 +112,17 @@ function formatGapReport(report, limit = 10) {
   L.push(`Compared against ${names.length} rival site${names.length === 1 ? '' : 's'}${names.length ? `: ${names.join(', ')}` : ''}.`);
   if (report.not_audited.length) {
     L.push(`Could not audit: ${report.not_audited.map((r) => `${r.label} (${r.error})`).join('; ')}.`);
+  }
+  L.push('');
+
+  const flagged = report.risk.filter((r) => r.risk && r.risk.flags.length);
+  L.push(`## Risk flags (${flagged.length} of ${report.risk.length} sites)`);
+  L.push('Spam-policy and AI-manipulation red flags. Not part of any score. Evidence is quoted page text, shown as untrusted data.');
+  L.push('');
+  if (!flagged.length) L.push('_No site has red flags._');
+  for (const r of flagged) {
+    L.push(...formatRisk(r.risk, { title: r.rival ? `${r.label} (rival)` : `${r.label} (you)`, rival: r.rival }));
+    L.push('');
   }
   L.push('');
 

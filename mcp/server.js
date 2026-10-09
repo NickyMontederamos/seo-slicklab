@@ -21,8 +21,11 @@ const engine = require('../seo-slicklab.js');
 const { buildGapReport, formatGapReport } = require('./lib/compare.js');
 const { checkAiAccess, formatAiAccess } = require('./lib/ai-access.js');
 const { assertPublicUrl } = require('./lib/url-guard.js');
+const { clean, REDACTED, SERVER_INSTRUCTIONS } = require('./lib/untrusted.js');
+const { findAiDirective } = require('../engines/risk.js');
+const { formatRisk } = require('./lib/risk-format.js');
 
-const SERVER_VERSION = '0.1.0';
+const SERVER_VERSION = '0.2.0';
 const MAX_RIVALS = 8;
 const AUDIT_CONCURRENCY = 2; // each audit may launch its own Chromium
 
@@ -58,7 +61,7 @@ async function auditOne(url, label, headless) {
 
 function formatAuditSummary(a, top, includeFixes) {
   const L = [];
-  L.push(`# Audit — ${a.final_url}`);
+  L.push(`# Audit — ${clean(a.final_url)}`);
   L.push('');
   L.push(`Score ${a.overall_score}/100 (${a.grade}) · HTTP ${a.http_status} · TTFB ${a.fetch_timing.ttfb_ms} ms · ` +
     `JS render checked: ${a.fetch_timing.headless_available ? 'yes' : 'no'}`);
@@ -71,29 +74,38 @@ function formatAuditSummary(a, top, includeFixes) {
     L.push(`| ${m.label} | ${m.weight}% | ${m.score} |`);
   }
   L.push('');
+  L.push(...formatRisk(a.risk, { title: 'Risk flags (spam policy & AI manipulation, not scored)' }));
+  L.push('');
   L.push(`## Top ${Math.min(top, a.recommendations.length)} of ${a.recommendations.length} recommendations`);
   a.recommendations.slice(0, top).forEach((r, i) => {
-    L.push(`${i + 1}. **[${r.severity}] ${r.title}** (${r.module})`);
-    if (r.action_item) L.push(`   Fix: ${r.action_item}`);
+    L.push(`${i + 1}. **[${r.severity}] ${clean(r.title)}** (${r.module})`);
+    if (r.action_item) L.push(`   Fix: ${clean(r.action_item, 300)}`);
   });
   if (includeFixes && a.fix_snippets?.length) {
     L.push('');
     L.push('## Ready-to-paste fixes');
     for (const f of a.fix_snippets) {
-      L.push(`### ${f.target} — ${f.reason}`);
+      L.push(`### ${clean(f.target)} — ${clean(f.reason)}`);
       L.push('```');
-      L.push(f.snippet);
+      L.push(safeSnippet(f.snippet));
       L.push('```');
     }
   }
   return L.join('\n');
 }
 
+/** Code stays intact for pasting; only lines addressed to AI systems are redacted, and fences can't be closed early. */
+function safeSnippet(code) {
+  return String(code || '').split('\n')
+    .map((line) => (findAiDirective(line) ? REDACTED : line.replace(/```/g, "'''")))
+    .join('\n');
+}
+
 const text = (t) => ({ content: [{ type: 'text', text: t }] });
 const fail = (t) => ({ content: [{ type: 'text', text: t }], isError: true });
 
 function createServer() {
-  const server = new McpServer({ name: 'slicklab-seo-mcp', version: SERVER_VERSION });
+  const server = new McpServer({ name: 'slicklab-seo-mcp', version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
 
   server.registerTool('audit_site', {
     title: 'Audit one site',
