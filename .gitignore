@@ -4,3 +4,4 @@ node_modules/
 bots/config.json
 reports/
 *.key.json
+outputs/

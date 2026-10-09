@@ -1,0 +1,8 @@
+# SEO-slicklab — only index.php is a public page.
+# Hide the code, tools, reports and dependencies that live next to it.
+# (Apache / LiteSpeed. If the site shows "500 Internal Server Error" after upload,
+#  delete this file and use deploy/nginx-snippet.conf with your host instead.)
+<IfModule mod_alias.c>
+RedirectMatch 404 ^/(mcp|bots|engines|test|deploy|node_modules|reports|outputs)(/|$)
+RedirectMatch 404 ^/(package(-lock)?\.json|seo-slicklab\.js|[^/]*\.md|.*\.key\.json|\.env)$
+</IfModule>
