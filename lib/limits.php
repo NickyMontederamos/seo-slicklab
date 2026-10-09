@@ -11,15 +11,30 @@ declare(strict_types=1);
  * Both use plain files under the system temp dir (allowed by aaPanel's open_basedir).
  */
 
-function limits_dir(): string {
-    $dir = getenv('SLICKLAB_LIMITS_DIR') ?: (rtrim(sys_get_temp_dir(), '/') . '/seo-slicklab-limits');
-    if (!is_dir($dir)) @mkdir($dir, 0700, true);
-    return $dir;
+/**
+ * First writable candidate: SLICKLAB_LIMITS_DIR, PHP's temp dir, then /tmp. PHP's temp dir can
+ * point outside open_basedir on hosting panels, so it is never the only option.
+ * Returns null when nothing is writable; the limits then let audits through and log why.
+ */
+function limits_dir(): ?string {
+    static $dir = false;
+    if ($dir !== false) return $dir;
+    $candidates = array_filter([
+        getenv('SLICKLAB_LIMITS_DIR') ?: null,
+        rtrim(sys_get_temp_dir(), '/') . '/seo-slicklab-limits',
+        '/tmp/seo-slicklab-limits',
+    ]);
+    foreach (array_unique($candidates) as $c) {
+        if (!@is_dir($c)) @mkdir($c, 0700, true);
+        if (@is_dir($c) && @is_writable($c)) return $dir = $c;
+    }
+    error_log('seo-slicklab limits: no writable directory (tried ' . implode(', ', $candidates) . '); limits are off');
+    return $dir = null;
 }
 
 /** Salted so the stored key can't be reversed into an IP by guessing. The salt lives next to the data. */
-function visitor_key(string $ip): string {
-    $saltFile = limits_dir() . '/.salt';
+function visitor_key(string $dir, string $ip): string {
+    $saltFile = $dir . '/.salt';
     $salt = @file_get_contents($saltFile);
     if ($salt === false || strlen($salt) < 32) {
         $salt = bin2hex(random_bytes(32));
@@ -34,8 +49,9 @@ function visitor_key(string $ip): string {
  * Returns [allowed, seconds until the next audit is allowed].
  */
 function rate_limit_take(string $ip, int $max, int $window = 3600): array {
-    if ($max <= 0) return [true, 0];
-    $file = limits_dir() . '/rl-' . substr(visitor_key($ip), 0, 40);
+    $dir = limits_dir();
+    if ($max <= 0 || $dir === null) return [true, 0];
+    $file = $dir . '/rl-' . substr(visitor_key($dir, $ip), 0, 40);
     $fh = @fopen($file, 'c+');
     if (!$fh) return [true, 0]; // never lock people out because of a disk problem
     try {
@@ -62,25 +78,37 @@ function rate_limit_take(string $ip, int $max, int $window = 3600): array {
 
 /** Delete rate-limit files nobody has touched for a while (called now and then). */
 function rate_limit_gc(int $window = 3600): void {
-    foreach (glob(limits_dir() . '/rl-*') ?: [] as $f) {
+    $dir = limits_dir();
+    if ($dir === null) return;
+    foreach (glob($dir . '/rl-*') ?: [] as $f) {
         if (@filemtime($f) < time() - $window) @unlink($f);
     }
 }
 
 /**
  * Claim one of $slots audit slots. Returns the open lock handle (keep it until the audit ends,
- * then pass it to audit_slot_release) or null when every slot is busy.
+ * then pass it to audit_slot_release), true when the lock files can't be used at all (the audit
+ * runs and the problem is logged), or null when every slot is genuinely busy.
  * The OS releases the lock if PHP dies mid-audit, so a crash can't leak a slot.
  */
 function audit_slot_take(int $slots) {
+    $dir = limits_dir();
+    if ($dir === null) return true;
+    $opened = 0;
     for ($i = 0; $i < max(1, $slots); $i++) {
-        $fh = @fopen(limits_dir() . "/slot-$i.lock", 'c');
-        if ($fh && flock($fh, LOCK_EX | LOCK_NB)) return $fh;
-        if ($fh) fclose($fh);
+        $fh = @fopen("$dir/slot-$i.lock", 'c');
+        if (!$fh) continue;
+        $opened++;
+        if (flock($fh, LOCK_EX | LOCK_NB)) return $fh;
+        fclose($fh);
+    }
+    if ($opened === 0) {
+        error_log("seo-slicklab limits: cannot open lock files in $dir; running without the concurrency cap");
+        return true;
     }
     return null;
 }
 
 function audit_slot_release($fh): void {
-    if ($fh) { flock($fh, LOCK_UN); fclose($fh); }
+    if (is_resource($fh)) { flock($fh, LOCK_UN); fclose($fh); }
 }

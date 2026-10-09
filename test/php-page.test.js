@@ -51,20 +51,22 @@ async function startPhp(env) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slicklab-php-'));
   const json = path.join(dir, 'audit.json');
   fs.writeFileSync(json, JSON.stringify(AUDIT));
+  fs.mkdirSync(path.join(dir, 'tmp')); // PHP's temp dir, so the fallback never touches the shared /tmp
   const fake = path.join(dir, 'fake-node');
   fs.writeFileSync(fake, `#!/bin/sh\n${env.delay ? `sleep ${env.delay}\n` : ''}cat '${json}'\n`, { mode: 0o755 });
   const port = 20000 + Math.floor(Math.random() * 20000);
-  const php = spawn('php', ['-S', `127.0.0.1:${port}`, '-t', ROOT], {
+  const php = spawn('php', [...(env.phpArgs || []), '-S', `127.0.0.1:${port}`, '-t', ROOT], {
     stdio: 'ignore',
-    env: { ...process.env, SLICKLAB_NODE: fake, SLICKLAB_LIMITS_DIR: path.join(dir, 'limits'),
+    env: { ...process.env, SLICKLAB_NODE: fake, SLICKLAB_LIMITS_DIR: env.limitsDir || path.join(dir, 'limits'),
       SLICKLAB_RATE_LIMIT: String(env.rate || 50), SLICKLAB_MAX_CONCURRENT: String(env.slots || 2),
-      PHP_CLI_SERVER_WORKERS: '4' }
+      TMPDIR: path.join(dir, 'tmp'), PHP_CLI_SERVER_WORKERS: '4' }
   });
   for (let i = 0; i < 50; i++) {
     try { await new Promise((ok, bad) => http.get(`http://127.0.0.1:${port}/`, (r) => { r.resume(); r.on('end', ok); }).on('error', bad)); break; }
     catch { await new Promise((r) => setTimeout(r, 100)); }
   }
-  return { port, close: () => { php.kill(); fs.rmSync(dir, { recursive: true, force: true }); } };
+  const limitsDir = env.limitsDir || path.join(dir, 'limits');
+  return { port, limitsDir, close: () => { php.kill(); fs.rmSync(dir, { recursive: true, force: true }); } };
 }
 
 test('the report shows the ranked fixes and files, and escapes everything that came from the audited site',
@@ -113,13 +115,38 @@ test('each visitor gets a limited number of audits per hour',
 
 test('only the configured number of audits run at once',
   { skip: !hasPhp && 'php not installed', timeout: 60000 }, async () => {
-    const php = await startPhp({ slots: 1, delay: 2 });
+    const php = await startPhp({ slots: 1 });
+    // Another PHP process holds the only slot, exactly like a long audit in progress.
+    const holder = spawn('php', ['-r', `require '${path.join(ROOT, 'lib/limits.php')}';` +
+      ' $h = audit_slot_take(1); echo is_resource($h) ? "held\\n" : "none\\n"; sleep(30);'],
+      { env: { ...process.env, SLICKLAB_LIMITS_DIR: php.limitsDir } });
     try {
-      const [a, b] = await Promise.all([post(php.port, PUBLIC_IP_URL), post(php.port, PUBLIC_IP_URL)]);
-      const busy = [a, b].filter((h) => /Other checks are running right now/.test(h)).length;
-      const done = [a, b].filter((h) => /Fix these first/.test(h)).length;
-      assert.equal(busy, 1);
-      assert.equal(done, 1);
-      assert.match(await post(php.port, PUBLIC_IP_URL), /Fix these first/, 'the slot is released afterwards');
+      const said = await new Promise((resolve) => holder.stdout.once('data', (d) => resolve(String(d).trim())));
+      assert.equal(said, 'held');
+      assert.match(await post(php.port, PUBLIC_IP_URL), /Other checks are running right now/);
+      holder.kill();
+      await new Promise((r) => holder.once('exit', r));
+      assert.match(await post(php.port, PUBLIC_IP_URL), /Fix these first/, 'the slot is free again once the holder ends');
+      assert.match(await post(php.port, PUBLIC_IP_URL), /Fix these first/, 'and the page releases its own slot');
+    } finally { holder.kill(); php.close(); }
+  });
+
+test('a limits directory PHP cannot write never blocks audits (falls back, then fails open)',
+  { skip: !hasPhp && 'php not installed', timeout: 60000 }, async () => {
+    // Like aaPanel: open_basedir fences PHP into the site folder, so no temp dir is writable.
+    const php = await startPhp({ limitsDir: '/proc/forbidden', rate: 1,
+      phpArgs: ['-d', `open_basedir=${ROOT}/`, '-d', 'error_log=/dev/null'] });
+    try {
+      assert.match(await post(php.port, PUBLIC_IP_URL), /Fix these first/);
+      assert.match(await post(php.port, PUBLIC_IP_URL), /Fix these first/, 'no limit state can be kept, so none is enforced');
+    } finally { php.close(); }
+  });
+
+test('an unwritable SLICKLAB_LIMITS_DIR falls back to the temp dir and still enforces limits',
+  { skip: !hasPhp && 'php not installed', timeout: 60000 }, async () => {
+    const php = await startPhp({ limitsDir: '/proc/forbidden', rate: 1 });
+    try {
+      assert.match(await post(php.port, PUBLIC_IP_URL), /Fix these first/);
+      assert.match(await post(php.port, PUBLIC_IP_URL), /You&#039;ve run 1 checks in the last hour/);
     } finally { php.close(); }
   });
