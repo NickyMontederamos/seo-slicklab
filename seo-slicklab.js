@@ -75,7 +75,7 @@ catch (e) {
   // Show the real cause: "not found" and "found but broken" need different fixes.
   const why = e.code === 'MODULE_NOT_FOUND' && /'cheerio'/.test(e.message)
     ? 'cheerio is not installed' : `cheerio failed to load: ${String(e.message).split('\n')[0]}`;
-  console.error(`\n  ✖ ${why}\n    Fix: run "npm ci --omit=dev --omit=optional" in ${__dirname}\n`);
+  console.error(`\n  ✖ ${why}\n    Fix: run "npm install --omit=dev --omit=optional" in ${__dirname}\n`);
   process.exit(2);
 }
 
