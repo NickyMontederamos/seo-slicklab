@@ -1,7 +1,9 @@
 # Deploying SEO-slicklab by file upload
 
 For hosts where you only have FTP or a file manager (no SSH). The zip already contains
-the Node packages, so there is no `npm install` step.
+the Node packages the website and bots need (cheerio, ~8 MB), so there is no `npm install` step.
+The MCP server is not meant for the web server — run it on your own computer from the git
+repo after `npm install`.
 
 ## Before you start
 - Your server needs **Node.js 18.17 or newer**. If audits stop working after the upload,
