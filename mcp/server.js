@@ -25,14 +25,14 @@ const engine = require('../seo-slicklab.js');
 const { buildGapReport, formatGapReport } = require('./lib/compare.js');
 const { checkAiAccess, formatAiAccess } = require('./lib/ai-access.js');
 const { assertPublicUrl } = require('./lib/url-guard.js');
-const { clean, REDACTED, SERVER_INSTRUCTIONS } = require('./lib/untrusted.js');
+const { clean, evidence, REDACTED, SERVER_INSTRUCTIONS } = require('./lib/untrusted.js');
 const { findAiDirective } = require('../engines/risk.js');
 const { crawlSite, formatCrawl } = require('./lib/crawl.js');
 const gsc = require('./lib/gsc.js');
 const { localPackCheck, formatLocalPack } = require('./lib/places.js');
 const { formatRisk } = require('./lib/risk-format.js');
 
-const SERVER_VERSION = '0.3.0';
+const SERVER_VERSION = '0.4.0';
 const MAX_RIVALS = 8;
 const AUDIT_CONCURRENCY = 2; // each audit may launch its own Chromium
 
@@ -81,24 +81,44 @@ function formatAuditSummary(a, top, includeFixes) {
     L.push(`| ${m.label} | ${m.weight}% | ${m.score} |`);
   }
   L.push('');
-  L.push(...formatRisk(a.risk, { title: 'Risk flags (spam policy & AI manipulation, not scored)' }));
+  L.push(...formatAdvice(a.advice, top, includeFixes));
   L.push('');
-  L.push(`## Top ${Math.min(top, a.recommendations.length)} of ${a.recommendations.length} recommendations`);
-  a.recommendations.slice(0, top).forEach((r, i) => {
-    L.push(`${i + 1}. **[${r.severity}] ${clean(r.title)}** (${r.module})`);
-    if (r.action_item) L.push(`   Fix: ${clean(r.action_item, 300)}`);
-  });
-  if (includeFixes && a.fix_snippets?.length) {
-    L.push('');
-    L.push('## Ready-to-paste fixes');
-    for (const f of a.fix_snippets) {
-      L.push(`### ${clean(f.target)} — ${clean(f.reason)}`);
+  L.push(...formatRisk(a.risk, { title: 'Risk flags (spam policy & AI manipulation, not scored)' }));
+  return L.join('\n');
+}
+
+/** The advisor's ranked findings; files only when asked for (they can be long). */
+function formatAdvice(adv, top, includeFixes) {
+  if (!adv) return [];
+  const L = [`> ${clean(adv.summary, 400)}`, '', '## Fix these first'];
+  const files = Object.fromEntries((adv.fixes || []).map((f) => [f.id, f.file]));
+  const line = (f, i) => {
+    L.push(`${i + 1}. **[${f.impact} impact · ${f.effort_label}] ${clean(f.title)}**`);
+    L.push(`   ${clean(f.why, 400)}`);
+    for (const e of (f.evidence || []).slice(0, 3)) L.push(`   Quoted from the site: ${evidence(e)}`);
+    L.push(`   Fix: ${clean(f.fix, 300)}${f.fix_file && files[f.fix_file] ? ` (file: ${files[f.fix_file]})` : ''}`);
+  };
+  adv.top.forEach(line);
+  const more = adv.appendix.slice(0, Math.max(0, top - adv.top.length));
+  if (adv.appendix.length) {
+    L.push('', `## More to do (${adv.appendix.length})`);
+    more.forEach((f, i) => line(f, adv.top.length + i));
+    for (const f of adv.appendix.slice(more.length)) L.push(`- [${f.impact}] ${clean(f.title)}`);
+  }
+  if (adv.not_checked?.length) {
+    L.push('', '## Not checked by this audit');
+    for (const n of adv.not_checked) L.push(`- ${n}`);
+  }
+  if (includeFixes && adv.fixes?.length) {
+    L.push('', '## Ready-to-paste files', 'Built only from facts on the page; lines marked TO CONFIRM need the owner.');
+    for (const f of adv.fixes) {
+      L.push(`### ${f.file} — ${clean(f.note)}`);
       L.push('```');
-      L.push(safeSnippet(f.snippet));
+      L.push(safeSnippet(f.content));
       L.push('```');
     }
   }
-  return L.join('\n');
+  return L;
 }
 
 /** Code stays intact for pasting; only lines addressed to AI systems are redacted, and fences can't be closed early. */
@@ -117,12 +137,13 @@ function createServer() {
   server.registerTool('audit_site', {
     title: 'Audit one site',
     description: 'Run the SEO-slicklab 10-engine audit (metadata, AI/GEO, JS rendering, DOM, links, schema, ' +
-      'E-E-A-T, server/security, performance) on one public URL. Read-only. Takes 10–60 seconds.',
+      'E-E-A-T, server/security, performance) on one public URL and rank what to fix first, with ready-to-paste ' +
+      'files built from the page. Read-only. Takes 10–60 seconds.',
     inputSchema: {
       url: z.string().describe('Public page URL, e.g. https://slicklab.digital/'),
       headless: z.boolean().default(true).describe('Render with Chromium to compare raw vs JS-rendered HTML. Slower.'),
-      top: z.number().int().min(1).max(50).default(10).describe('How many recommendations to list'),
-      include_fixes: z.boolean().default(false).describe('Append the generated ready-to-paste fix snippets')
+      top: z.number().int().min(1).max(50).default(10).describe('How many findings to explain in full (the rest are listed by title)'),
+      include_fixes: z.boolean().default(false).describe('Append the ready-to-paste files (robots.txt, llms.txt, schema) built from the page')
     }
   }, async ({ url, headless, top, include_fixes }) => {
     const r = await auditOne(url, null, headless);

@@ -80,6 +80,7 @@ catch (e) {
 }
 
 const riskEngine = require('./engines/risk.js');
+const advisor = require('./engines/advisor.js');
 
 let playwright = null;
 let playwrightErr = null;
@@ -323,6 +324,20 @@ async function fetchText(url, opts, ua) {
   } catch (e) {
     return { url, status: 0, ok: false, contentType: '', bytes: 0, text: '', error: e.message };
   } finally { clearTimeout(timer); }
+}
+
+/** Sitemap from robots.txt, else /sitemap.xml. ok = a real XML urlset or sitemap index. */
+async function fetchSitemap(declared, origin, opts) {
+  const url = declared && /^https?:\/\//i.test(declared) ? declared : origin + '/sitemap.xml';
+  const res = await fetchText(url, opts);
+  const head = String(res.text || '').trimStart().slice(0, 500).toLowerCase();
+  const ok = res.status === 200 && /<(urlset|sitemapindex)\b/.test(head);
+  return {
+    url, status: res.status, ok, declared: Boolean(declared),
+    isIndex: ok && /<sitemapindex\b/.test(head),
+    locCount: ok ? (res.text.match(/<loc>/gi) || []).length : 0,
+    error: res.error
+  };
 }
 
 /** 200 with a non-empty body that is not an HTML page (SPA catch-alls serve index.html for every path). */
@@ -2606,7 +2621,7 @@ async function runAudit(targetUrl, options) {
     : null;
 
   // ---- robots.txt & llms.txt ----
-  let robots = null, robotsParsed = null, llms = null, llmsFull = null;
+  let robots = null, robotsParsed = null, llms = null, llmsFull = null, sitemap = null;
   let socialImageHead = null, aiProbe = null;
 
   if (options.llms) {
@@ -2621,6 +2636,8 @@ async function runAudit(targetUrl, options) {
     llms = await fetchText(origin + '/llms.txt', options);
     step('Fetching /llms-full.txt…');
     llmsFull = await fetchText(origin + '/llms-full.txt', options);
+    step('Fetching sitemap…');
+    sitemap = await fetchSitemap(robotsParsed && robotsParsed.sitemaps[0], origin, options);
   } else {
     robots = { url: '', status: 0, ok: false, text: '', bytes: 0, error: 'skipped' };
     llms = { url: '', status: 0, ok: false, text: '', bytes: 0, error: 'skipped' };
@@ -2731,6 +2748,21 @@ async function runAudit(targetUrl, options) {
     fix_snippets: scoring.fix_snippets,
     risk
   };
+
+  result.advice = advisor.buildAdvice({
+    url: raw.finalUrl || targetUrl,
+    httpStatus: raw.status,
+    modules,
+    risk,
+    doc: hydratedDoc || rawDoc,
+    rawDoc,
+    renderedDoc: hydratedDoc,
+    rawHtml: raw.html,
+    robots, robotsParsed, llms,
+    llmsIsText: isTextFile(llms),
+    sitemap,
+    headlessAvailable: headless.available && Boolean(headless.html)
+  });
 
   return result;
 }

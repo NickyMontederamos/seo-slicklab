@@ -1,36 +1,55 @@
-# Deploying SEO-slicklab by file upload
+# Deploying seo.slicklab.digital
 
-For hosts where you only have FTP or a file manager (no SSH). The zip already contains
-the Node packages the website and bots need (cheerio, ~8 MB), so there is no `npm install` step.
-The MCP server is not meant for the web server — run it on your own computer from the git
-repo after `npm install`.
+The site runs straight from this git repo on the VPS (aaPanel + Nginx, PHP 8, Node 18.17+).
+Updates are one command, so nothing gets lost the way folder uploads can lose files.
 
-## Before you start
-- Your server needs **Node.js 18.17 or newer**. If audits stop working after the upload,
-  this is the first thing to check (hosting panel → "Setup Node.js App", or ask your host).
-- **Back up** the current site folder: in the file manager, select it → Compress → download.
+## First time (run as root over SSH)
 
-## Upload
-1. Open the folder that serves **seo.slicklab.digital** (often `public_html/seo` or `seo.slicklab.digital/`).
-2. Upload `seo-slicklab-deploy.zip` into that folder.
-3. **Extract** it there and allow it to **overwrite** existing files.
-4. **Do not delete** the existing `node_modules` folder first. Your server's Playwright
-   (the headless browser) lives there and is not in the zip.
-5. Delete the uploaded zip.
+```bash
+cd /www/wwwroot/seo.slicklab.digital
+git init -q
+git remote add origin https://github.com/NickyMontederamos/seo-slicklab.git
+git fetch -q origin main
+git reset --hard origin/main          # replaces tracked files; .user.ini and .well-known stay
+npm ci --omit=dev --omit=optional --no-audit --no-fund
+chown -R www:www . 2>/dev/null        # .user.ini is locked by aaPanel; its error is harmless
+```
 
-## Check it worked (5 minutes)
-1. Open https://seo.slicklab.digital/ and audit `https://slicklab.digital/`.
-   You should see a new **Risk flags** section under the score.
-2. Security check: audit `http://169.254.169.254/`.
-   You should get **"That address points to a private network and cannot be audited."**
-3. Hidden-files check: open https://seo.slicklab.digital/mcp/server.js
-   - **404 / Not Found** = good, the `.htaccess` rules are working (Apache/LiteSpeed).
-   - **You see code** = your server is Nginx. Send `deploy/nginx-snippet.conf` to your host
-     (or add it to the site config yourself) — nothing secret is exposed meanwhile, it is just source code.
-   - **500 Internal Server Error on the whole site** = delete `.htaccess`, then use the Nginx snippet route.
+If the repo is private, `git fetch` asks for a login. Add a read-only deploy key instead:
+`ssh-keygen -t ed25519 -f ~/.ssh/seo_slicklab -N ""`, paste `~/.ssh/seo_slicklab.pub` into
+GitHub → repo Settings → Deploy keys, then use
+`git remote set-url origin git@github.com:NickyMontederamos/seo-slicklab.git` and
+`GIT_SSH_COMMAND="ssh -i ~/.ssh/seo_slicklab" git fetch origin main`.
 
-## What is and isn't on the website
-- **On the website:** `index.php` — the audit page, now with risk flags and the private-address guard.
-- **Not on the website:** the MCP server (runs on your own computer with Claude) and the bots
-  (cron jobs; see `bots/README.md`). Their files are in the zip but hidden by the rules above.
-- Keep secrets (`bots/config.json`, service-account keys, `.env`) **outside** the web folder.
+## Nginx (once)
+
+The site config needs the rule in `deploy/nginx-snippet.conf`, placed right after the
+server-level `root` line in `/www/server/panel/vhost/nginx/seo.slicklab.digital.conf`.
+If you already have the older rule (it lists only `index.php` and `.well-known`), replace it,
+so `robots.txt`, `llms.txt` and `sitemap.xml` are served too. Then `nginx -t && nginx -s reload`.
+
+## Every update
+
+```bash
+bash /www/wwwroot/seo.slicklab.digital/deploy/update.sh
+```
+
+## Check it worked
+
+1. Open https://seo.slicklab.digital/ and check `https://slicklab.digital/`.
+   You should see **Fix these first** with ranked findings and **Ready-to-paste files**.
+2. Security: check `http://169.254.169.254/`. Expected: "That address points to a private network".
+3. Hidden files: https://seo.slicklab.digital/seo-slicklab.js and /lib/limits.php should be **404**;
+   /robots.txt, /llms.txt and /sitemap.xml should load.
+
+## Limits (optional)
+
+Set in the PHP-FPM environment (aaPanel → PHP → Configuration → `env[...]`) if you want to change them:
+- `SLICKLAB_RATE_LIMIT`: checks per visitor per hour (default 5)
+- `SLICKLAB_MAX_CONCURRENT`: checks running at once (default 2; each may start a browser)
+
+## What is not on the website
+
+The MCP server (runs on your own computer with Claude) and the bots (cron jobs; see
+`bots/README.md`) live in the same repo but are hidden by the Nginx rule.
+Keep secrets (`bots/config.json`, service-account keys, `.env`) **outside** the web folder.
