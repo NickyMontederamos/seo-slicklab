@@ -1,0 +1,6 @@
+# seo.slicklab.digital: a free SEO and AI visibility check by SlickLab.Digital.
+# Everything here may be crawled. Audits only run on a form POST, so crawling never triggers one.
+User-agent: *
+Allow: /
+
+Sitemap: https://seo.slicklab.digital/sitemap.xml

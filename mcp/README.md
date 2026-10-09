@@ -8,7 +8,7 @@ submits, or changes anything on any site.
 
 | Tool | What it does | Speed |
 |---|---|---|
-| `audit_site` | Full 10-engine audit of one URL, summarised (optionally with fix snippets) | 10–60 s |
+| `audit_site` | Full 10-engine audit of one URL: what to fix first (ranked by impact), plus ready-to-paste robots.txt, llms.txt and schema built from the page (`include_fixes`) | 10–60 s |
 | `compare_rivals` | Audits your site + up to 8 rivals. Reports **where rivals beat you**, **open ground nobody covers**, and **where you lead** | ~30 s per site |
 | `check_ai_access` | robots.txt rules for 12 AI/search crawlers, llms.txt, schema and JS-shell check in raw HTML | a few seconds per URL |
 | `crawl_site` | Every page from sitemap.xml (robots.txt respected): duplicate titles/descriptions, missing H1s, error pages, noindex-in-sitemap, thin pages, risk flags | ~2 s per page |

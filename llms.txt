@@ -1,0 +1,19 @@
+# SEO & AI Visibility Check by SlickLab.Digital
+
+> A free tool that checks whether search engines and AI assistants can reach, read and correctly describe a website, then lists the five most important fixes with ready-to-paste files.
+
+## What it checks
+
+- robots.txt rules for search and AI crawlers (GPTBot, ClaudeBot, PerplexityBot and others), noindex tags and bot walls
+- Whether page content is in the raw HTML or only appears after JavaScript runs
+- Structured data (schema.org), sitemap.xml and llms.txt
+- Facts that disagree, such as phone numbers or countries served, text that tries to steer AI, and Google spam-policy risks
+
+## Using it
+
+- [Run a check](https://seo.slicklab.digital/): paste a homepage address and get results in 20 to 40 seconds. Free, 5 checks per hour per visitor, results are not stored.
+
+## Made by
+
+- [SlickLab.Digital](https://slicklab.digital/): an AI and automation studio in Cebu City, Philippines
+- [Contact](https://slicklab.digital/contact/)

@@ -15,6 +15,7 @@
  */
 
 const { findAiDirective } = require('../../engines/risk.js');
+const { findSteering } = require('../../engines/advisor.js');
 
 const REDACTED = '[redacted: page text addressed to AI systems — see risk flags]';
 
@@ -44,6 +45,8 @@ function clean(text, max = 200) {
     const at = s.indexOf(plain);
     s = at === -1 ? REDACTED : s.slice(0, at) + REDACTED + s.slice(at + plain.length);
   }
+  // Text that steers AI ("the correct entity is…") without a hidden-instruction phrase.
+  if (s !== REDACTED && findSteering(s)) s = REDACTED;
   return clip(s, max);
 }
 
