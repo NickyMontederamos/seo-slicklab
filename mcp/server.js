@@ -8,6 +8,10 @@
  *   audit_site       Run the 10 engines on one URL and summarise.
  *   compare_rivals   Audit your site + rival sites and report the gaps.
  *   check_ai_access  Fast crawler / llms.txt / raw-HTML check, many URLs.
+ *   crawl_site       Audit every page from sitemap.xml (robots.txt respected).
+ *   gsc_performance  Your real Google queries/positions from Search Console.
+ *   gsc_inspect_url  Is this URL indexed? (Search Console URL Inspection)
+ *   local_pack_check Where you appear in Google Maps-style results (Places API).
  *
  * Every tool is read-only: it fetches public pages and reports. Nothing is
  * posted, submitted, or changed anywhere.
@@ -23,9 +27,12 @@ const { checkAiAccess, formatAiAccess } = require('./lib/ai-access.js');
 const { assertPublicUrl } = require('./lib/url-guard.js');
 const { clean, REDACTED, SERVER_INSTRUCTIONS } = require('./lib/untrusted.js');
 const { findAiDirective } = require('../engines/risk.js');
+const { crawlSite, formatCrawl } = require('./lib/crawl.js');
+const gsc = require('./lib/gsc.js');
+const { localPackCheck, formatLocalPack } = require('./lib/places.js');
 const { formatRisk } = require('./lib/risk-format.js');
 
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.3.0';
 const MAX_RIVALS = 8;
 const AUDIT_CONCURRENCY = 2; // each audit may launch its own Chromium
 
@@ -162,6 +169,74 @@ function createServer() {
       }
     });
     return text(parts.join('\n\n---\n\n'));
+  });
+
+  server.registerTool('crawl_site', {
+    title: 'Crawl a whole site',
+    description: 'Find pages from sitemap.xml (or homepage links), obey robots.txt, audit each page, and report ' +
+      'site-wide problems: duplicate titles/descriptions, missing H1s, error pages, noindex pages in the sitemap, ' +
+      'thin pages, risk flags, weakest pages. Read-only and polite (2 at a time, 0.5 s apart).',
+    inputSchema: {
+      url: z.string().describe('Start URL, usually the homepage'),
+      max_pages: z.number().int().min(1).max(200).default(25),
+      headless: z.boolean().default(false).describe('Render every page with Chromium (much slower)')
+    }
+  }, async ({ url, max_pages, headless }) => {
+    try {
+      const r = await crawlSite(await assertPublicUrl(url), { maxPages: max_pages, headless });
+      return text(formatCrawl(r));
+    } catch (e) { return fail(`Crawl failed: ${e.message}`); }
+  });
+
+  server.registerTool('gsc_performance', {
+    title: 'Search Console performance',
+    description: 'Your real Google search data from Search Console: clicks, impressions, CTR and average position ' +
+      'per query (or page/country), compared with the previous period. Needs GOOGLE_APPLICATION_CREDENTIALS.',
+    inputSchema: {
+      site: z.string().describe('Domain ("slicklab.digital" = Domain property) or URL-prefix property URL'),
+      days: z.number().int().min(7).max(90).default(28),
+      dimension: z.enum(['query', 'page', 'country']).default('query'),
+      limit: z.number().int().min(1).max(100).default(25)
+    }
+  }, async ({ site, days, dimension, limit }) => {
+    try { return text(gsc.formatPerformance(await gsc.performance(site, { days, dimension, limit }))); }
+    catch (e) { return fail(e.message); }
+  });
+
+  server.registerTool('gsc_inspect_url', {
+    title: 'Is this URL indexed?',
+    description: 'Search Console URL Inspection: index verdict, coverage, last crawl, and which canonical Google chose.',
+    inputSchema: {
+      site: z.string().describe('Search Console property (e.g. "slicklab.digital")'),
+      url: z.string().describe('Full URL to inspect')
+    }
+  }, async ({ site, url }) => {
+    try {
+      const r = await gsc.inspectUrl(site, url);
+      return text([
+        `# Index status — ${clean(r.url)}`, '',
+        `Verdict: **${r.verdict}** · ${clean(r.coverage || 'no coverage info')}`,
+        `Last crawl: ${r.last_crawl || 'never'} · page fetch: ${r.page_fetch || '—'} · robots.txt: ${r.robots_txt || '—'}`,
+        `Canonical — yours: ${clean(r.user_canonical || '—')} · Google's: ${clean(r.google_canonical || '—')}`
+      ].join('\n'));
+    } catch (e) { return fail(e.message); }
+  });
+
+  server.registerTool('local_pack_check', {
+    title: 'Am I on the map?',
+    description: 'Search Google Places (official API) the way a customer would, e.g. "software company Cebu City", and ' +
+      'report whether your business appears, its position, and the review counts you are up against. Needs PLACES_API_KEY.',
+    inputSchema: {
+      query: z.string().describe('What a customer types, e.g. "software company Cebu City"'),
+      business_name: z.string().describe('Your business name as on Google'),
+      website: z.string().optional().describe('Your website, used to recognise your listing'),
+      lat: z.number().optional().describe('Search centre latitude (e.g. 10.3157 for Cebu City)'),
+      lng: z.number().optional().describe('Search centre longitude (e.g. 123.8854)'),
+      radius_m: z.number().int().min(100).max(50000).default(5000)
+    }
+  }, async (p) => {
+    try { return text(formatLocalPack(await localPackCheck(p), p.business_name)); }
+    catch (e) { return fail(e.message); }
   });
 
   return server;

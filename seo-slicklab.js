@@ -2620,10 +2620,14 @@ async function runAudit(targetUrl, options) {
     };
     // CDNs routinely refuse requests that claim to be Googlebot from non-Google IPs,
     // so a refusal here says nothing about the real Googlebot. Only compare content.
-    const variants = [await asBot('Googlebot', UA_PROFILES.googlebot_desktop, false)];
-    variants.push(aiProbe
-      ? { label: 'GPTBot', status: aiProbe.status, html: aiProbe.html, finalUrl: aiProbe.finalUrl }
-      : await asBot('GPTBot', GPTBOT_UA, true));
+    // riskCrawlers:false skips these two extra requests (site crawls run them on the first page only).
+    const variants = [];
+    if (options.riskCrawlers !== false) {
+      variants.push(await asBot('Googlebot', UA_PROFILES.googlebot_desktop, false));
+      variants.push(aiProbe
+        ? { label: 'GPTBot', status: aiProbe.status, html: aiProbe.html, finalUrl: aiProbe.finalUrl }
+        : await asBot('GPTBot', GPTBOT_UA, true));
+    }
     risk = riskEngine.analyzeRisk({
       url: raw.finalUrl,
       status: raw.status,
@@ -2679,6 +2683,7 @@ async function runAudit(targetUrl, options) {
       dom_load_ms: headless.available ? headless.domLoadMs : null,
       headless_available: headless.available
     },
+    page: pageSummary(hydratedDoc || rawDoc),
     overall_score: scoring.overall_score,
     grade: scoring.grade,
     summary: {
@@ -2694,6 +2699,19 @@ async function runAudit(targetUrl, options) {
   };
 
   return result;
+}
+
+/** Key on-page facts, for site crawls and reports. */
+function pageSummary(doc) {
+  return {
+    title: doc.title || '',
+    meta_description: doc.metaDescription || '',
+    h1: doc.h1s.map((h) => h.text).slice(0, 5),
+    canonical: doc.canonicalAbs || doc.canonical || null,
+    meta_robots: doc.metaRobots || '',
+    lang: doc.lang || null,
+    word_count: doc.wordCount
+  };
 }
 
 /* ============================================================================

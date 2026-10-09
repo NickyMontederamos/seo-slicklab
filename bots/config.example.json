@@ -1,0 +1,21 @@
+{
+  "site": {
+    "name": "SlickLab.Digital",
+    "url": "https://slicklab.digital/",
+    "gsc_property": "slicklab.digital"
+  },
+  "rivals": [
+    { "label": "Rival one (replace)", "url": "https://rival-one.example/" },
+    { "label": "Rival two (replace)", "url": "https://rival-two.example/" }
+  ],
+  "local_pack": {
+    "queries": ["software company Cebu City", "web developer Cebu"],
+    "lat": 10.3157,
+    "lng": 123.8854,
+    "radius_m": 8000
+  },
+  "crawl": { "max_pages": 50, "headless": false },
+  "rank_tracker": { "days": 28, "limit": 50, "move_alert": 3 },
+  "rival_scout": { "headless": false },
+  "reports_dir": "/var/lib/slicklab-reports"
+}

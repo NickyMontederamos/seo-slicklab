@@ -30,12 +30,19 @@ const textOf = (res) => res.content.map((c) => c.text).join('\n');
 
 test('MCP server end to end', { timeout: 240000 }, async (t) => {
   const [you, strong, plain] = await Promise.all([startSite(SPA_SITE), startSite(STRONG_SITE), startSite(PLAIN_SITE)]);
-  const client = await connect({ SLICKLAB_ALLOW_PRIVATE: '1' });
+  const client = await connect({ SLICKLAB_ALLOW_PRIVATE: '1', PLACES_API_KEY: '' });
   t.after(async () => { await client.close(); you.close(); strong.close(); plain.close(); });
 
-  await t.test('lists the three tools', async () => {
+  await t.test('lists all tools', async () => {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((x) => x.name).sort(), ['audit_site', 'check_ai_access', 'compare_rivals']);
+    assert.deepEqual(tools.map((x) => x.name).sort(), ['audit_site', 'check_ai_access', 'compare_rivals', 'crawl_site',
+      'gsc_inspect_url', 'gsc_performance', 'local_pack_check']);
+  });
+
+  await t.test('keyed tools fail with setup help, not a crash', async () => {
+    const res = await client.callTool({ name: 'local_pack_check', arguments: { query: 'software company Cebu', business_name: 'SlickLab' } });
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /PLACES_API_KEY is not set/);
   });
 
   await t.test('audit_site returns a summary', async () => {

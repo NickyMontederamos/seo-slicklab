@@ -11,6 +11,13 @@ submits, or changes anything on any site.
 | `audit_site` | Full 10-engine audit of one URL, summarised (optionally with fix snippets) | 10–60 s |
 | `compare_rivals` | Audits your site + up to 8 rivals. Reports **where rivals beat you**, **open ground nobody covers**, and **where you lead** | ~30 s per site |
 | `check_ai_access` | robots.txt rules for 12 AI/search crawlers, llms.txt, schema and JS-shell check in raw HTML | a few seconds per URL |
+| `crawl_site` | Every page from sitemap.xml (robots.txt respected): duplicate titles/descriptions, missing H1s, error pages, noindex-in-sitemap, thin pages, risk flags | ~2 s per page |
+| `gsc_performance` | Your real Google queries, clicks and average positions vs. the previous period (Search Console) | seconds |
+| `gsc_inspect_url` | Is this URL indexed, when was it crawled, which canonical Google picked | seconds |
+| `local_pack_check` | Your position in Google's local results and the review gap (Places API) | seconds |
+
+The Google tools need keys — see [`bots/README.md`](../bots/README.md) for the 10-minute setup.
+Scheduled versions of these run as cron bots on your server (same guide).
 
 ## Risk flags (spam policy & AI manipulation)
 
@@ -76,6 +83,8 @@ Then ask: *"Compare slicklab.digital against symph.co and arcanys.com"*.
 | `PLAYWRIGHT_BROWSERS_PATH` | Where Playwright browsers live (your server uses `/var/cache/playwright`) |
 | `SLICKLAB_CHROMIUM_PATH` | Exact Chromium binary, when the playwright package and installed browsers are different versions |
 | `SLICKLAB_ALLOW_PRIVATE=1` | Allow localhost / private-network URLs (local dev and tests only) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to the Search Console service-account JSON key (outside the web root) |
+| `PLACES_API_KEY` | Places API (New) key, restricted to that API and your server IP |
 
 ## Safety notes
 
