@@ -12,6 +12,29 @@ submits, or changes anything on any site.
 | `compare_rivals` | Audits your site + up to 8 rivals. Reports **where rivals beat you**, **open ground nobody covers**, and **where you lead** | ~30 s per site |
 | `check_ai_access` | robots.txt rules for 12 AI/search crawlers, llms.txt, schema and JS-shell check in raw HTML | a few seconds per URL |
 
+## Risk flags (spam policy & AI manipulation)
+
+Every audit also runs `engines/risk.js`. Its flags sit **next to** the score and never change it:
+
+| Flag | What it catches |
+|---|---|
+| Hidden text addressed to AI systems | Concealed text that speaks to assistants ("note to AI assistants: …") — indirect prompt injection, and a common sign of a hacked site |
+| AI-addressed text in comments, meta, alt text, JSON-LD | The same, in places visitors never see |
+| Hidden / spam-category links | Concealed outbound links, gambling/pharma/loan links |
+| Cloaking | Googlebot or GPTBot gets different content than visitors |
+| Server refuses GPTBot | A firewall/CDN rule blocks it even if robots.txt allows it |
+| Sneaky redirects, keyword stuffing | Straight from Google's spam policies |
+
+The detector only fires on text that *addresses* an AI system, so a page that merely talks
+about AI ("our AI assistant writes captions") stays clean. Hidden-by-colour and off-screen
+text needs the rendered page (Playwright); everything else works on raw HTML.
+Skip with `--no-risk`.
+
+**Agent safety.** Tool output is built from third-party pages. Page text is flattened and any
+sentence addressed to an AI system is redacted; risk evidence is shown datamarked as
+`UNTRUSTED⟦words·joined·like·this⟧`, and the server's MCP instructions tell clients to treat
+it as data. For rivals with real violations, reports link to Google's spam report form.
+
 ## Install
 
 ```bash

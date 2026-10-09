@@ -8,6 +8,9 @@
 
 const cheerio = require('cheerio');
 const engine = require('../../seo-slicklab.js');
+const { analyzeRisk } = require('../../engines/risk.js');
+const { clean } = require('./untrusted.js');
+const { formatRisk } = require('./risk-format.js');
 
 /** Crawlers grouped by what they do. Search = answers live questions; training = model training. */
 const CRAWLERS = [
@@ -114,7 +117,9 @@ function analyzeAiAccess({ url, page, robots, llms }) {
       h1: doc.h1s.slice(0, 3).map((h) => h.text), word_count: words,
       json_ld_types: doc.jsonLdTypes, looks_like_js_shell: jsShell
     },
-    findings
+    findings,
+    // Raw-HTML risk scan only: no rendered page and no crawler variants in this fast check.
+    risk: analyzeRisk({ url, rawHtml: page.text, status: page.status })
   };
 }
 
@@ -135,20 +140,25 @@ async function checkAiAccess(url, timeout = 15000) {
 
 function formatAiAccess(r) {
   const L = [];
-  L.push(`# AI access — ${r.url}`);
+  L.push(`# AI access — ${clean(r.url)}`);
   L.push('');
-  L.push(`HTTP ${r.http_status} · raw HTML ${r.raw_html.word_count} words · schema: ${r.raw_html.json_ld_types.join(', ') || 'none'} · llms.txt: ${r.llms_txt.present ? 'yes' : 'no'}`);
+  L.push(`HTTP ${r.http_status} · raw HTML ${r.raw_html.word_count} words · schema: ${clean(r.raw_html.json_ld_types.join(', ')) || 'none'} · llms.txt: ${r.llms_txt.present ? 'yes' : 'no'}`);
+  L.push(`Title: "${clean(r.raw_html.title, 120)}"${r.raw_html.h1.length ? ` · H1: "${clean(r.raw_html.h1[0], 120)}"` : ''}`);
   L.push('');
   if (r.findings.length) {
     L.push('## Findings');
     r.findings.forEach((f, i) => {
-      L.push(`${i + 1}. **[${f.impact}] ${f.title}**${f.detail ? ` — ${f.detail}` : ''}`);
+      L.push(`${i + 1}. **[${f.impact}] ${clean(f.title)}**${f.detail ? ` — ${clean(f.detail, 300)}` : ''}`);
       L.push(`   Fix: ${f.fix}`);
     });
   } else {
     L.push('No AI-access problems found.');
   }
   L.push('');
+  if (r.risk) {
+    L.push(...formatRisk(r.risk, { title: 'Risk flags (raw HTML only)' }));
+    L.push('');
+  }
   L.push('## Crawlers');
   L.push('| Crawler | Operator | Purpose | Allowed |');
   L.push('|---|---|---|---|');
