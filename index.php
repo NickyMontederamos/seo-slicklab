@@ -17,6 +17,50 @@ function sev_class(string $s): string {
     return ['critical'=>'bad','warning'=>'warn','notice'=>'info'][$s] ?? 'info';
 }
 
+/**
+ * Visitors choose the URL, so refuse anything that resolves to this server or a
+ * private network (localhost, LAN, cloud metadata at 169.254.169.254, ...).
+ * The engine re-checks every redirect and browser request in public mode.
+ */
+function ip_is_public(string $ip): bool {
+    if (stripos($ip, '::ffff:') === 0 && filter_var(substr($ip, 7), FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        $ip = substr($ip, 7);
+    }
+    if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) return false;
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        $n = ip2long($ip);
+        foreach ([['100.64.0.0', 10], ['0.0.0.0', 8], ['127.0.0.0', 8], ['169.254.0.0', 16], ['224.0.0.0', 3]] as [$net, $bits]) {
+            $mask = -1 << (32 - $bits);
+            if (($n & $mask) === (ip2long($net) & $mask)) return false;
+        }
+    } else {
+        $l = strtolower($ip);
+        if ($l === '::1' || $l === '::' || preg_match('/^(fc|fd|fe8|fe9|fea|feb|ff)/', $l)) return false;
+    }
+    return true;
+}
+
+function url_target_error(string $url): ?string {
+    $host = strtolower(trim((string)parse_url($url, PHP_URL_HOST), '[]'));
+    if ($host === '') return 'Invalid URL.';
+    if ($host === 'localhost' || preg_match('/\.(localhost|internal)$/', $host)) {
+        return 'That address points to a private network and cannot be audited.';
+    }
+    if (filter_var($host, FILTER_VALIDATE_IP)) {
+        $ips = [$host];
+    } else {
+        $ips = gethostbynamel($host) ?: [];
+        foreach (@dns_get_record($host, DNS_AAAA) ?: [] as $r) {
+            if (!empty($r['ipv6'])) $ips[] = $r['ipv6'];
+        }
+        if (!$ips) return 'Could not resolve that domain. Check the spelling.';
+    }
+    foreach ($ips as $ip) {
+        if (!ip_is_public($ip)) return 'That address points to a private network and cannot be audited.';
+    }
+    return null;
+}
+
 function run_cli_audit(string $node, string $script, string $pwPath,
                        string $url, int $timeout,
                        ?string &$rawOut, ?string &$error,
@@ -29,7 +73,7 @@ function run_cli_audit(string $node, string $script, string $pwPath,
         1 => ['pipe','w'],
         2 => ['pipe','w'],
     ];
-    $env = ['PLAYWRIGHT_BROWSERS_PATH' => $pwPath];
+    $env = ['PLAYWRIGHT_BROWSERS_PATH' => $pwPath, 'SLICKLAB_PUBLIC_MODE' => '1'];
 
     $proc = proc_open($args, $desc, $pipes, null, $env, ['timeout' => ($timeout + 15) * 1000000]);
     if (!is_resource($proc)) {
@@ -75,6 +119,8 @@ if ($run && $url !== '') {
         $error = 'Invalid URL.';
     } elseif (!in_array(parse_url($url, PHP_URL_SCHEME), ['http','https'], true)) {
         $error = 'Only http:// and https:// URLs are allowed.';
+    } elseif (($why = url_target_error($url)) !== null) {
+        $error = $why;
     } elseif (!is_file($SCRIPT)) {
         $error = "Engine not found: $SCRIPT";
     } else {

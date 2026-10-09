@@ -1,3 +1,7 @@
 node_modules/
 .well-known/
 .env
+bots/config.json
+reports/
+*.key.json
+outputs/

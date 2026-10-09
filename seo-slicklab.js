@@ -71,8 +71,11 @@ const GPTBOT_UA = 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatibl
 
 let cheerio;
 try { cheerio = require('cheerio'); }
-catch {
-  console.error('\n  ✖ Missing dependency: cheerio\n    npm install cheerio\n');
+catch (e) {
+  // Show the real cause: "not found" and "found but broken" need different fixes.
+  const why = e.code === 'MODULE_NOT_FOUND' && /'cheerio'/.test(e.message)
+    ? 'cheerio is not installed' : `cheerio failed to load: ${String(e.message).split('\n')[0]}`;
+  console.error(`\n  ✖ ${why}\n    Fix: run "npm install --omit=dev --omit=optional" in ${__dirname}\n`);
   process.exit(2);
 }
 
@@ -235,6 +238,32 @@ ${bold('ENVIRONMENT')}
  * 5. NETWORK LAYER
  * ==========================================================================*/
 
+// Public mode (set by index.php): the audit is driven by untrusted visitors, so every
+// request — each redirect hop, robots/llms/social-image fetches, and everything the
+// headless browser loads — must resolve to a public address.
+const publicMode = () => process.env.SLICKLAB_PUBLIC_MODE === '1';
+let urlGuard = null;
+async function guardUrl(url) {
+  if (!publicMode()) return url;
+  urlGuard = urlGuard || require('./mcp/lib/url-guard.js');
+  return urlGuard.assertPublicUrl(url);
+}
+
+/** fetch(); in public mode redirects are followed by hand so each hop is checked. */
+async function netFetch(url, init) {
+  if (!publicMode()) return fetch(url, { ...init, redirect: 'follow' });
+  let current = url;
+  for (let hop = 0; hop <= 10; hop++) {
+    await guardUrl(current);
+    const res = await fetch(current, { ...init, redirect: 'manual' });
+    const loc = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null;
+    if (!loc) return res;
+    await res.body?.cancel().catch(() => {});
+    current = new URL(loc, current).href;
+  }
+  throw new Error('Too many redirects');
+}
+
 async function fetchRaw(targetUrl, opts, overrideUa) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opts.timeout);
@@ -243,8 +272,7 @@ async function fetchRaw(targetUrl, opts, overrideUa) {
 
   let res;
   try {
-    res = await fetch(targetUrl, {
-      redirect: 'follow',
+    res = await netFetch(targetUrl, {
       signal: ctrl.signal,
       headers: {
         'User-Agent': ua,
@@ -280,8 +308,8 @@ async function fetchText(url, opts, ua) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.min(opts.timeout, 15000));
   try {
-    const res = await fetch(url, {
-      redirect: 'follow', signal: ctrl.signal,
+    const res = await netFetch(url, {
+      signal: ctrl.signal,
       headers: { 'User-Agent': ua || UA_PROFILES.slicklab_default,
                  Accept: 'text/plain,text/markdown,text/html,*/*' }
     });
@@ -309,8 +337,8 @@ async function headCheck(url, opts) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.min(opts.timeout, 10000));
   try {
-    const res = await fetch(url, {
-      method: 'HEAD', redirect: 'follow', signal: ctrl.signal,
+    const res = await netFetch(url, {
+      method: 'HEAD', signal: ctrl.signal,
       headers: { 'User-Agent': UA_PROFILES.slicklab_default }
     });
     const cl = res.headers.get('content-length');
@@ -332,10 +360,15 @@ async function fetchHeadless(targetUrl, opts) {
   const { chromium } = playwright;
   const t0 = performance.now();
   let browser = null;
+  let guardProxy = null;
 
   try {
+    // Public mode: all browser traffic (redirect hops included) goes through a checking proxy.
+    // "<-loopback>" stops Chromium's default bypass for localhost, so that is checked too.
+    if (publicMode()) guardProxy = await require('./engines/guard-proxy.js').startGuardProxy();
     browser = await chromium.launch({
       headless: true,
+      proxy: guardProxy ? { server: guardProxy.server, bypass: '<-loopback>' } : undefined,
       // Pin a specific Chromium binary when the playwright package and installed browsers differ.
       executablePath: process.env.SLICKLAB_CHROMIUM_PATH || undefined,
       args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
@@ -408,6 +441,7 @@ async function fetchHeadless(targetUrl, opts) {
     };
   } finally {
     if (browser) await browser.close().catch(() => {});
+    if (guardProxy) await guardProxy.close().catch(() => {});
   }
 }
 
@@ -2620,10 +2654,14 @@ async function runAudit(targetUrl, options) {
     };
     // CDNs routinely refuse requests that claim to be Googlebot from non-Google IPs,
     // so a refusal here says nothing about the real Googlebot. Only compare content.
-    const variants = [await asBot('Googlebot', UA_PROFILES.googlebot_desktop, false)];
-    variants.push(aiProbe
-      ? { label: 'GPTBot', status: aiProbe.status, html: aiProbe.html, finalUrl: aiProbe.finalUrl }
-      : await asBot('GPTBot', GPTBOT_UA, true));
+    // riskCrawlers:false skips these two extra requests (site crawls run them on the first page only).
+    const variants = [];
+    if (options.riskCrawlers !== false) {
+      variants.push(await asBot('Googlebot', UA_PROFILES.googlebot_desktop, false));
+      variants.push(aiProbe
+        ? { label: 'GPTBot', status: aiProbe.status, html: aiProbe.html, finalUrl: aiProbe.finalUrl }
+        : await asBot('GPTBot', GPTBOT_UA, true));
+    }
     risk = riskEngine.analyzeRisk({
       url: raw.finalUrl,
       status: raw.status,
@@ -2679,6 +2717,7 @@ async function runAudit(targetUrl, options) {
       dom_load_ms: headless.available ? headless.domLoadMs : null,
       headless_available: headless.available
     },
+    page: pageSummary(hydratedDoc || rawDoc),
     overall_score: scoring.overall_score,
     grade: scoring.grade,
     summary: {
@@ -2694,6 +2733,19 @@ async function runAudit(targetUrl, options) {
   };
 
   return result;
+}
+
+/** Key on-page facts, for site crawls and reports. */
+function pageSummary(doc) {
+  return {
+    title: doc.title || '',
+    meta_description: doc.metaDescription || '',
+    h1: doc.h1s.map((h) => h.text).slice(0, 5),
+    canonical: doc.canonicalAbs || doc.canonical || null,
+    meta_robots: doc.metaRobots || '',
+    lang: doc.lang || null,
+    word_count: doc.wordCount
+  };
 }
 
 /* ============================================================================
