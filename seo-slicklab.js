@@ -222,6 +222,7 @@ ${bold('EXAMPLES')}
 ${bold('ENVIRONMENT')}
   NO_COLOR=1     Disable ANSI colours
   SLICKLAB_UA    Override the default User-Agent
+  SLICKLAB_CHROMIUM_PATH  Chromium binary to use when playwright and installed browsers differ
 `);
 }
 
@@ -291,6 +292,14 @@ async function fetchText(url, opts, ua) {
   } finally { clearTimeout(timer); }
 }
 
+/** 200 with a non-empty body that is not an HTML page (SPA catch-alls serve index.html for every path). */
+function isTextFile(res) {
+  if (!res || res.status !== 200 || !String(res.text || '').trim()) return false;
+  const head = res.text.trimStart().slice(0, 200).toLowerCase();
+  return !String(res.contentType || '').toLowerCase().includes('text/html') &&
+    !head.startsWith('<!doctype') && !head.startsWith('<html');
+}
+
 async function headCheck(url, opts) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.min(opts.timeout, 10000));
@@ -322,6 +331,8 @@ async function fetchHeadless(targetUrl, opts) {
   try {
     browser = await chromium.launch({
       headless: true,
+      // Pin a specific Chromium binary when the playwright package and installed browsers differ.
+      executablePath: process.env.SLICKLAB_CHROMIUM_PATH || undefined,
       args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
     });
     const ctx = await browser.newContext({
@@ -972,7 +983,7 @@ function engineGeoValidator(ctx) {
   }
 
   // ---- /llms.txt ----
-  if (llms && llms.status === 200 && llms.text.trim()) {
+  if (isTextFile(llms)) {
     const text = llms.text;
     const hasH1 = /^#\s+.+/m.test(text);
     const hasBlockquote = /^>\s+.+/m.test(text);
@@ -1016,7 +1027,8 @@ function engineGeoValidator(ctx) {
     }
   } else {
     checks.push(check('llms_txt.present', '/llms.txt present', 'fail', 'warning',
-      llms && llms.status ? `/llms.txt returned HTTP ${llms.status}.` : 'No /llms.txt found.',
+      llms && llms.status === 200 ? '/llms.txt returns an HTML page (catch-all route), not a text file.'
+        : llms && llms.status ? `/llms.txt returned HTTP ${llms.status}.` : 'No /llms.txt found.',
       { action: 'Publish /llms.txt at the site root for LLM discoverability.' }));
     checks.push(check('llms_txt.h1', '/llms.txt has H1 title', 'skip', 'notice', '/llms.txt missing.'));
     checks.push(check('llms_txt.summary', '/llms.txt has blockquote summary', 'skip', 'notice', '/llms.txt missing.'));
@@ -1025,7 +1037,7 @@ function engineGeoValidator(ctx) {
   }
 
   // ---- /llms-full.txt ----
-  if (llmsFull && llmsFull.status === 200 && llmsFull.text.trim()) {
+  if (isTextFile(llmsFull)) {
     checks.push(check('llms_full.present', '/llms-full.txt present', 'pass', 'notice',
       `/llms-full.txt found (${fmtBytes(llmsFull.bytes)}).`, { value: llmsFull.url }));
   } else {
@@ -2880,10 +2892,29 @@ async function main() {
   return 0;
 }
 
-main()
-  .then((code) => process.exit(code || 0))
-  .catch((err) => {
-    console.error(red(`\n✖ Fatal: ${err.message}\n`));
-    if (process.env.SLICKLAB_DEBUG) console.error(err.stack);
-    process.exit(1);
-  });
+if (require.main === module) {
+  main()
+    .then((code) => process.exit(code || 0))
+    .catch((err) => {
+      console.error(red(`\n✖ Fatal: ${err.message}\n`));
+      if (process.env.SLICKLAB_DEBUG) console.error(err.stack);
+      process.exit(1);
+    });
+}
+
+/* ============================================================================
+ * 22. LIBRARY EXPORTS (used by mcp/server.js)
+ * ==========================================================================*/
+
+/** Same defaults the CLI uses when no flags are passed. */
+function defaultOptions(overrides = {}) {
+  return { ...parseArgs(['node', 'seo-slicklab']), ...overrides };
+}
+function setQuiet(on) { QUIET = Boolean(on); }
+
+module.exports = {
+  VERSION, TOOL, AI_CRAWLERS, MODULE_META,
+  runAudit, defaultOptions, setQuiet, normalizeUrl,
+  fetchText, fetchRaw, isTextFile, parseRobotsTxt, isBotBlocked, extractDocument,
+  formatMarkdown
+};
