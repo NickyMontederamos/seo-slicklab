@@ -21,6 +21,7 @@ const fs = require('fs');
 const { URL } = require('url');
 const { randomUUID } = require('crypto');
 const { performance } = require('perf_hooks');
+const urlGuard = require('./lib/url-guard');
 
 /* ============================================================================
  * 0. CONSTANTS
@@ -63,6 +64,11 @@ const MODULE_META = {
 };
 
 const SEVERITY_WEIGHT = { critical: 6, warning: 3, notice: 1, info: 1 };
+
+/** Public mode (set by index.php): refuse private/internal targets on every hop. */
+const PUBLIC_MODE = process.env.SLICKLAB_PUBLIC_MODE === '1';
+const EXIT_URL_NOT_ALLOWED = 3;
+const httpFetch = PUBLIC_MODE ? urlGuard.guardedFetch : fetch;
 
 /* ============================================================================
  * 1. OPTIONAL DEPENDENCIES
@@ -237,7 +243,7 @@ async function fetchRaw(targetUrl, opts, overrideUa) {
 
   let res;
   try {
-    res = await fetch(targetUrl, {
+    res = await httpFetch(targetUrl, {
       redirect: 'follow',
       signal: ctrl.signal,
       headers: {
@@ -274,7 +280,7 @@ async function fetchText(url, opts, ua) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.min(opts.timeout, 15000));
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       redirect: 'follow', signal: ctrl.signal,
       headers: { 'User-Agent': ua || UA_PROFILES.slicklab_default,
                  Accept: 'text/plain,text/markdown,text/html,*/*' }
@@ -295,7 +301,7 @@ async function headCheck(url, opts) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), Math.min(opts.timeout, 10000));
   try {
-    const res = await fetch(url, {
+    const res = await httpFetch(url, {
       method: 'HEAD', redirect: 'follow', signal: ctrl.signal,
       headers: { 'User-Agent': UA_PROFILES.slicklab_default }
     });
@@ -318,17 +324,29 @@ async function fetchHeadless(targetUrl, opts) {
   const { chromium } = playwright;
   const t0 = performance.now();
   let browser = null;
+  let guardProxy = null;
 
   try {
+    const launchArgs = ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'];
+    if (PUBLIC_MODE) {
+      // All browser traffic goes through the checking proxy; WebRTC UDP
+      // cannot be proxied, so turn it off.
+      guardProxy = await urlGuard.startGuardProxy();
+      launchArgs.push('--force-webrtc-ip-handling-policy=disable_non_proxied_udp');
+    }
     browser = await chromium.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+      args: launchArgs,
+      // '<-loopback>' stops Chromium's default "localhost skips the proxy" rule.
+      ...(guardProxy ? { proxy: { server: guardProxy.url, bypass: '<-loopback>' } } : {})
     });
     const ctx = await browser.newContext({
       userAgent: process.env.SLICKLAB_UA || UA_PROFILES[opts.profile] || UA_PROFILES.slicklab_default,
       viewport: { width: 1366, height: 900 },
       ignoreHTTPSErrors: true
     });
+    const isAllowed = PUBLIC_MODE ? urlGuard.createUrlChecker() : null;
+    if (PUBLIC_MODE) await urlGuard.guardBrowserContext(ctx, isAllowed);
     const page = await ctx.newPage();
 
     const consoleErrors = [];
@@ -352,6 +370,10 @@ async function fetchHeadless(targetUrl, opts) {
     });
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
     await sleep(NETWORK_IDLE_MS);
+
+    // If a redirect landed on a private host (the proxy refused it), don't
+    // report that page.
+    if (PUBLIC_MODE && !(await isAllowed(page.url()))) throw new urlGuard.UrlNotAllowedError();
 
     const html = await page.content();
     const finalUrl = page.url();
@@ -389,6 +411,7 @@ async function fetchHeadless(targetUrl, opts) {
     };
   } finally {
     if (browser) await browser.close().catch(() => {});
+    if (guardProxy) await guardProxy.close();
   }
 }
 
@@ -2840,6 +2863,16 @@ async function main() {
     return 1;
   }
 
+  if (PUBLIC_MODE) {
+    urlGuard.installDnsGuard();
+    try {
+      await urlGuard.assertPublicUrl(url);
+    } catch (err) {
+      console.error(err.message);
+      return EXIT_URL_NOT_ALLOWED;
+    }
+  }
+
   log('');
   log(bold(`${TOOL} v${VERSION}`) + gray('  →  ') + cyan(url));
   log('');
@@ -2848,6 +2881,10 @@ async function main() {
   try {
     result = await runAudit(url, opts);
   } catch (err) {
+    if (err instanceof urlGuard.UrlNotAllowedError) {
+      console.error(err.message);
+      return EXIT_URL_NOT_ALLOWED;
+    }
     console.error(red(`\n✖ Audit failed: ${err.message}\n`));
     if (opts.verbose) console.error(err.stack);
     return 1;

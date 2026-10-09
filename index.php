@@ -1,11 +1,19 @@
 <?php
 declare(strict_types=1);
 
+require __DIR__ . '/lib/url-guard.php';
+require __DIR__ . '/lib/rate-limit.php';
+
 $NODE = '/usr/bin/node';
 $SCRIPT = __DIR__ . '/seo-slicklab.js';
 $PW_PATH = '/var/cache/playwright';
 $TIMEOUT = 60;
 $DEFAULT_URL = 'https://slicklab.digital/';
+$RL_DIR = sys_get_temp_dir() . '/seo-slicklab-rl';
+$RL_MAX_PER_IP = 5;        // audits per client IP...
+$RL_WINDOW_SEC = 600;      // ...per 10 minutes
+$MAX_CONCURRENT = 2;       // Chromium runs at once, server-wide
+const ENGINE_EXIT_URL_NOT_ALLOWED = 3; // seo-slicklab.js exit code in public mode
 
 function esc(?string $s): string {
     return htmlspecialchars((string)$s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
@@ -20,7 +28,7 @@ function sev_class(string $s): string {
 function run_cli_audit(string $node, string $script, string $pwPath,
                        string $url, int $timeout,
                        ?string &$rawOut, ?string &$error,
-                       bool $noHeadless = false): ?array {
+                       bool $noHeadless = false, ?int &$exitCode = null): ?array {
     $args = [$node, $script, $url, '--format', 'json', '--quiet'];
     if ($noHeadless) $args[] = '--no-headless';
 
@@ -29,7 +37,9 @@ function run_cli_audit(string $node, string $script, string $pwPath,
         1 => ['pipe','w'],
         2 => ['pipe','w'],
     ];
-    $env = ['PLAYWRIGHT_BROWSERS_PATH' => $pwPath];
+    // SLICKLAB_PUBLIC_MODE makes the engine re-check every fetch (redirect
+    // hops, DNS answers, browser requests) against lib/url-guard.js.
+    $env = ['PLAYWRIGHT_BROWSERS_PATH' => $pwPath, 'SLICKLAB_PUBLIC_MODE' => '1'];
 
     $proc = proc_open($args, $desc, $pipes, null, $env, ['timeout' => ($timeout + 15) * 1000000]);
     if (!is_resource($proc)) {
@@ -42,6 +52,12 @@ function run_cli_audit(string $node, string $script, string $pwPath,
     fclose($pipes[1]);
     fclose($pipes[2]);
     $code = proc_close($proc);
+    $exitCode = $code;
+
+    if ($code === ENGINE_EXIT_URL_NOT_ALLOWED) {
+        $error = trim($errOut) !== '' ? trim($errOut) : URL_GUARD_NOT_ALLOWED_MSG;
+        return null;
+    }
 
     // Combine stdout + stderr for error reporting
     $combined = $rawOut . "\n" . $errOut;
@@ -75,14 +91,23 @@ if ($run && $url !== '') {
         $error = 'Invalid URL.';
     } elseif (!in_array(parse_url($url, PHP_URL_SCHEME), ['http','https'], true)) {
         $error = 'Only http:// and https:// URLs are allowed.';
+    } elseif (($guardError = url_guard_check($url)) !== null) {
+        $error = $guardError;
     } elseif (!is_file($SCRIPT)) {
         $error = "Engine not found: $SCRIPT";
+    } elseif (!rate_limit_allow((string)($_SERVER['REMOTE_ADDR'] ?? 'unknown'),
+                                $RL_MAX_PER_IP, $RL_WINDOW_SEC, $RL_DIR)) {
+        $error = 'Too many audits from your address. Please wait a few minutes and try again.';
+    } elseif (($slot = rate_limit_acquire_slot($RL_DIR, $MAX_CONCURRENT)) === null) {
+        $error = 'The server is busy running other audits. Please try again in a minute.';
     } else {
         @set_time_limit($TIMEOUT + 30);
-        $audit = run_cli_audit($NODE, $SCRIPT, $PW_PATH, $url, $TIMEOUT, $rawOut, $error);
-        if ($audit === null) {
+        $exitCode = null;
+        $audit = run_cli_audit($NODE, $SCRIPT, $PW_PATH, $url, $TIMEOUT, $rawOut, $error, false, $exitCode);
+        if ($audit === null && $exitCode !== ENGINE_EXIT_URL_NOT_ALLOWED) {
             $audit = run_cli_audit($NODE, $SCRIPT, $PW_PATH, $url, $TIMEOUT, $rawOut, $error, true);
         }
+        if (is_resource($slot)) fclose($slot);
     }
 }
 
